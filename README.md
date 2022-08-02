@@ -24,10 +24,10 @@ func main() {
 	// 检查指定日期是否是法定节假日
 	fmt.Printf("2019-01-01是否节假日: %v\n\n", h.Check("2019-01-01"))
 
-	// 列举2020年所有节假日
+	// 列举2016年和2019所有节假日
 	holidays, workdays := h.List(2016, 2019)
 
-	fmt.Printf("2020年:\n节假日%v\n调休日（需要上班）%v\n\n", holidays, workdays)
+	fmt.Printf("2016年和2019年:\n节假日%v\n调休日（需要上班）%v\n\n", holidays, workdays)
 
 	// 查询指定时间范围节假日(注意：将来的节假日需等gov.cn发布)
 	holidays, workdays = h.Range("2008-01-01", "2022-12-01")
