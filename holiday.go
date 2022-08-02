@@ -2,10 +2,11 @@ package holiday
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"github.com/gocolly/colly"
 	"github.com/gocolly/colly/extensions"
+	"github.com/golang-module/carbon/v2"
+	log "github.com/sirupsen/logrus"
 	"github.com/thoas/go-funk"
 	"io"
 	"io/ioutil"
@@ -18,160 +19,111 @@ import (
 	"time"
 )
 
-const (
-	dateFormat      = "2006-01-02"
-	timeFormat      = "2006-01-02 15:04:05"
-	fileSp          = "---------------"
-	defaultFilename = "holiday-data"
-)
-
-// 固定节假日名称
-var legalHolidays = []string{
-	"元旦",
-	"春节",
-	"清明节",
-	"劳动节",
-	"端午节",
-	"中秋节",
-	"国庆节",
-}
-
-// 参数
-type Config struct {
-	Filename string // 数据文件名
-}
-
 type ChinaHoliday struct {
-	f        bool   // 文件存储
-	filename string // 文件名
+	ops Options
+	f   bool
 }
 
-// 创建实例
-func New(config *Config) (*ChinaHoliday, error) {
-	if config == nil {
-		config = &Config{
-			Filename: defaultFilename,
-		}
+func New(options ...func(*Options)) (ins ChinaHoliday) {
+	ops := getOptionsOrSetDefault(nil)
+	for _, f := range options {
+		f(ops)
 	}
-	f := true
-	if config.Filename == "" {
-		f = false
-	}
-	if f {
-		filename := config.Filename
-		info, err := os.Stat(filename)
+	if ops.filename != "" {
+		ins.f = true
+		info, err := os.Stat(ops.filename)
 		var file *os.File
 		if err != nil {
-			// 创建文件
-			file, err = os.OpenFile(filename, os.O_WRONLY|os.O_CREATE, 0666)
+			// create file if not exists
+			file, err = os.OpenFile(ops.filename, os.O_WRONLY|os.O_CREATE, 0666)
 			if err != nil {
-				return nil, err
+				ins.f = false
 			}
 		} else if info.IsDir() {
-			return nil, errors.New(fmt.Sprintf("文件名%s不能是目录", filename))
+			// skip dir
+			ins.f = false
 		}
-		// 及时关闭file句柄
 		defer file.Close()
 	}
-	ins := ChinaHoliday{
-		f:        f,
-		filename: config.Filename,
-	}
-	return &ins, nil
+	ins.ops = *ops
+	return
 }
 
-// 检查某个日期是否是节假日(支持yyyy-MM-dd)
-func (s *ChinaHoliday) Check(date string) (bool, error) {
-	// 日期转换
-	now, err := time.ParseInLocation(dateFormat, date, time.Local)
-	if err != nil {
-		return false, err
-	}
+// Check 检查某个日期是否是节假日(支持yyyy-MM-dd)
+func (ch ChinaHoliday) Check(date string) (holiday bool) {
+	d := carbon.Parse(date)
 
-	year := now.Year()
-	holidays, workdays, err := s.all(year)
-	if err != nil {
-		return false, err
-	}
+	year := d.Year()
+	holidays, workdays := ch.all(year)
 
 	// 校验是否节假日
-	nowDate := now.Format(dateFormat)
+	nowDate := d.ToDateString()
 	if funk.ContainsString(holidays, nowDate) {
 		// 节假日
-		return true, nil
+		holiday = true
+		return
 	} else {
-		weekDay := now.Weekday()
-		if weekDay == time.Sunday || weekDay == time.Saturday {
-			if !funk.ContainsString(workdays, nowDate) {
-				// 非调休日
-				return true, nil
-			}
+		if d.IsWeekday() && !funk.ContainsString(workdays, nowDate) {
+			// 周末且不是调休
+			holiday = true
+			return
 		}
 	}
-	return false, nil
+	return
 }
 
-// 获取某一年节假日数目(周末除外)
-func (s *ChinaHoliday) List(year int) ([]string, []string, error) {
-	return s.all(year)
-}
-
-// 获取指定日期之间有多少节假日
-func (s *ChinaHoliday) Range(startDate, endDate string) ([]string, []string, error) {
-	years := getYears(startDate, endDate)
-	allHolidays, allWorkdays, err := s.all(years...)
-	if err != nil {
-		return nil, nil, err
+// List 获取某一年节假日数目(周末除外)
+func (ch ChinaHoliday) List(years ...int) (holidays, workdays []string) {
+	for _, year := range years {
+		h, w := ch.all(year)
+		holidays = append(holidays, h...)
+		workdays = append(workdays, w...)
 	}
-	holidays := make([]string, 0)
-	workdays := make([]string, 0)
+	return
+}
+
+// Range 获取指定日期之间有多少节假日
+func (ch ChinaHoliday) Range(start, end string) (holidays, workdays []string) {
+	years := getYears(start, end)
+	allHolidays, allWorkdays := ch.all(years...)
+	holidays = make([]string, 0)
+	workdays = make([]string, 0)
 	for _, holiday := range allHolidays {
-		_, _, after1 := timeAfter(startDate, holiday)
-		_, _, after2 := timeAfter(holiday, endDate)
-		if after1 && after2 {
+		if lt(start, holiday) && lt(holiday, end) {
 			holidays = append(holidays, holiday)
 		}
 	}
 	for _, workday := range allWorkdays {
-		_, _, after1 := timeAfter(startDate, workday)
-		_, _, after2 := timeAfter(workday, endDate)
-		if after1 && after2 {
+		if lt(start, workday) && lt(workday, end) {
 			workdays = append(workdays, workday)
 		}
 	}
-	return holidays, workdays, nil
+	return
 }
 
 // 读取全部节假日(一年或多年)
-func (s *ChinaHoliday) all(years ...int) ([]string, []string, error) {
-	holidays := make([]string, 0)
-	workdays := make([]string, 0)
+func (ch ChinaHoliday) all(years ...int) (holidays, workdays []string) {
+	holidays = make([]string, 0)
+	workdays = make([]string, 0)
 	// 从文件中读取数据
-	list, err := s.getFromFile()
+	list := ch.getFromFile()
 	for _, year := range years {
 		currentHolidays := make([]string, 0)
 		currentWorkdays := make([]string, 0)
-		if err == nil {
-			if oldData, ok := list[year]; ok {
-				if len(oldData) == 1 {
-					currentHolidays = oldData[0]
-				} else if len(oldData) == 2 {
-					currentHolidays = oldData[0]
-					currentWorkdays = oldData[1]
-				}
+		if oldData, ok := list[year]; ok {
+			if len(oldData) == 1 {
+				currentHolidays = oldData[0]
+			} else if len(oldData) == 2 {
+				currentHolidays = oldData[0]
+				currentWorkdays = oldData[1]
 			}
 		}
 		if len(currentHolidays) == 0 && len(currentWorkdays) == 0 {
 			// 读取线上数据
-			currentHolidays, currentWorkdays, err = s.online(year)
-			if err == nil && s.f {
+			currentHolidays, currentWorkdays = ch.online(year)
+			if ch.f {
 				// 存入文件
-				err = s.appendToFile(year, currentHolidays, currentWorkdays)
-				if err != nil {
-					return nil, nil, err
-				}
-			} else if err != nil {
-				return nil, nil, err
+				ch.appendToFile(year, currentHolidays, currentWorkdays)
 			}
 		}
 		if len(currentHolidays) > 0 {
@@ -181,18 +133,18 @@ func (s *ChinaHoliday) all(years ...int) ([]string, []string, error) {
 			workdays = append(workdays, currentWorkdays...)
 		}
 	}
-	return holidays, workdays, nil
+	return
 }
 
 // 从文件中获取数据
-func (s *ChinaHoliday) getFromFile() (map[int][][]string, error) {
-	list := make(map[int][][]string)
-	if !s.f {
-		return list, nil
+func (ch ChinaHoliday) getFromFile() (list map[int][][]string) {
+	list = make(map[int][][]string)
+	if !ch.f {
+		return
 	}
-	file, err := os.OpenFile(s.filename, os.O_RDONLY, 0666)
+	file, err := os.OpenFile(ch.ops.filename, os.O_RDONLY, 0666)
 	if err != nil {
-		return nil, err
+		return
 	}
 	defer file.Close()
 	br := bufio.NewReader(file)
@@ -223,30 +175,27 @@ func (s *ChinaHoliday) getFromFile() (map[int][][]string, error) {
 		}
 		i++
 	}
-	return list, nil
+	return
 }
 
-// 写入文件
-func (s *ChinaHoliday) appendToFile(year int, holidays, workdays []string) error {
-	file, err := os.OpenFile(s.filename, os.O_WRONLY|os.O_APPEND, 0666)
+func (ch ChinaHoliday) appendToFile(year int, holidays, workdays []string) {
+	file, err := os.OpenFile(ch.ops.filename, os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
-		return err
+		return
 	}
 	defer file.Close()
 
-	// 写入数据文件
 	write := bufio.NewWriter(file)
 	write.WriteString(fmt.Sprintf("%d\n", year))
 	write.WriteString(fmt.Sprintf("%s\n", strings.Join(holidays, ",")))
 	write.WriteString(fmt.Sprintf("%s\n", strings.Join(workdays, ",")))
 	write.WriteString(fmt.Sprintf("%s\n", fileSp))
 	write.Flush()
-	return nil
+	return
 }
 
-// 刷新文件
-func (s *ChinaHoliday) refreshFile(year int, holidays, workdays []string) error {
-	b, err := ioutil.ReadFile(s.filename)
+func (ch ChinaHoliday) refreshFile(year int, holidays, workdays []string) error {
+	b, err := ioutil.ReadFile(ch.ops.filename)
 	if err != nil {
 		return err
 	}
@@ -275,7 +224,7 @@ func (s *ChinaHoliday) refreshFile(year int, holidays, workdays []string) error 
 		),
 	)
 	// 覆盖旧文件
-	file, err := os.OpenFile(s.filename, os.O_WRONLY|os.O_TRUNC, 0666)
+	file, err := os.OpenFile(ch.ops.filename, os.O_WRONLY|os.O_TRUNC, 0666)
 	if err != nil {
 		return err
 	}
@@ -287,7 +236,8 @@ func (s *ChinaHoliday) refreshFile(year int, holidays, workdays []string) error 
 }
 
 // 或取指定年份的线上节假日数据
-func (s *ChinaHoliday) online(year int) ([]string, []string, error) {
+func (ch ChinaHoliday) online(year int) (holidays, workdays []string) {
+	time.Sleep(time.Second)
 	c := colly.NewCollector(
 		// 允许重复访问
 		colly.AllowURLRevisit(),
@@ -304,9 +254,9 @@ func (s *ChinaHoliday) online(year int) ([]string, []string, error) {
 	searchUrl := "http://sousuo.gov.cn/s.htm?" + u.Encode()
 
 	// 休假时间
-	holidays := make([]string, 0)
+	holidays = make([]string, 0)
 	// 调休时间
-	workdays := make([]string, 0)
+	workdays = make([]string, 0)
 	// 上一年调休时间(GOV一般是11月份发布第二年, 可能涉及跨年调休, 该调休应该属于上一年)
 	lastYearWorkdays := make([]string, 0)
 
@@ -323,15 +273,7 @@ func (s *ChinaHoliday) online(year int) ([]string, []string, error) {
 	})
 	// 查看文章内容
 	c.OnHTML("td#UCAP-CONTENT", func(e *colly.HTMLElement) {
-		s := strings.Split(e.Text, "\n")
-		// 去掉前面无效的信息
-		arr := make([]string, 0)
-		for i, v := range s {
-			if strings.Contains(v, "一、") {
-				arr = s[i:]
-				break
-			}
-		}
+		arr := convertText(e.Text)
 		for _, v1 := range arr {
 			for _, v2 := range legalHolidays {
 				if strings.Contains(v1, v2) {
@@ -339,9 +281,11 @@ func (s *ChinaHoliday) online(year int) ([]string, []string, error) {
 					// 截取休假时间
 					// 1月1日至3日
 					// 2月11日至17日
+					// 1月1日
 					item0 := lineArr[0]
 					r1 := regexp.MustCompile(`([\d]{1,2})月([\d]{1,2})日至([\d]{1,2})月([\d]{1,2})日`)
 					r2 := regexp.MustCompile(`([\d]{1,2})月([\d]{1,2})日至([\d]{1,2})日`)
+					r3 := regexp.MustCompile(`([\d]{1,2})月([\d]{1,2})日`)
 					var holidayDates []string
 					if r1.MatchString(item0) {
 						params := r1.FindStringSubmatch(item0)
@@ -362,6 +306,12 @@ func (s *ChinaHoliday) online(year int) ([]string, []string, error) {
 								fmt.Sprintf("%d-%02d-%02d", year, month, str2Int(params[3])),
 							)
 						}
+					} else if r3.MatchString(item0) {
+						params := r3.FindStringSubmatch(item0)
+						if len(params) == 3 {
+							month := str2Int(params[1])
+							holidayDates = append(holidayDates, fmt.Sprintf("%d-%02d-%02d", year, month, str2Int(params[2])))
+						}
 					}
 					// 去重
 					for _, date := range holidayDates {
@@ -375,11 +325,11 @@ func (s *ChinaHoliday) online(year int) ([]string, []string, error) {
 						item1 := lineArr[1]
 						item1Arr := strings.Split(item1, "、")
 						for _, v3 := range item1Arr {
-							// r3解释: GOV一般是11月份发布第二年, 可能涉及跨年调休, 该调休应该属于上一年
-							r3 := regexp.MustCompile(`([\d]{4})年([\d]{1,2})月([\d]{1,2})日`)
-							r4 := regexp.MustCompile(`([\d]{1,2})月([\d]{1,2})日`)
-							if r3.MatchString(v3) {
-								params := r3.FindStringSubmatch(v3)
+							// r4解释: GOV一般是11月份发布第二年, 可能涉及跨年调休, 该调休应该属于上一年
+							r4 := regexp.MustCompile(`([\d]{4})年([\d]{1,2})月([\d]{1,2})日`)
+							r5 := regexp.MustCompile(`([\d]{1,2})月([\d]{1,2})日`)
+							if r4.MatchString(v3) {
+								params := r4.FindStringSubmatch(v3)
 								if len(params) == 4 {
 									if str2Int(params[1]) == year-1 {
 										date := fmt.Sprintf("%d-%02d-%02d", year-1, str2Int(params[2]), str2Int(params[3]))
@@ -388,8 +338,8 @@ func (s *ChinaHoliday) online(year int) ([]string, []string, error) {
 										}
 									}
 								}
-							} else if r4.MatchString(v3) {
-								params := r4.FindStringSubmatch(v3)
+							} else if r5.MatchString(v3) {
+								params := r5.FindStringSubmatch(v3)
 								if len(params) == 3 {
 									date := fmt.Sprintf("%d-%02d-%02d", year, str2Int(params[1]), str2Int(params[2]))
 									if !funk.ContainsString(workdays, date) {
@@ -423,103 +373,109 @@ func (s *ChinaHoliday) online(year int) ([]string, []string, error) {
 	// 访问页面
 	c.Visit(searchUrl)
 
-	// 等待结束
 	c.Wait()
 	if len(lastYearWorkdays) > 0 {
-		oldLastYearHolidays, oldLastYearWorkdays, lastYearErr := s.all(year - 1)
-		if lastYearErr == nil && s.f {
+		oldLastYearHolidays, oldLastYearWorkdays := ch.all(year - 1)
+		if ch.f {
 			oldLastYearWorkdays = append(oldLastYearWorkdays, lastYearWorkdays...)
-			s.refreshFile(year-1, oldLastYearHolidays, oldLastYearWorkdays)
+			ch.refreshFile(year-1, oldLastYearHolidays, oldLastYearWorkdays)
 		}
 	}
-	return holidays, workdays, err
+	if err != nil {
+		log.Warn(err)
+	}
+	return
+}
+
+func convertText(text string) (arr []string) {
+	l := len(IndexMap)
+	for i := 0; i < l; i++ {
+		item := IndexMap[i]
+		i1 := strings.Index(text, fmt.Sprintf("%s、", item))
+		if i1 >= 0 {
+			s1 := text[i1:]
+			if i < l-1 {
+				nextItem := IndexMap[i+1]
+				i2 := strings.Index(s1, fmt.Sprintf("%s、", nextItem))
+				in := strings.Index(s1, "\n")
+				if i2 >= 0 {
+					arr = append(arr, s1[0:i2])
+				} else if in >= 0 {
+					arr = append(arr, s1[0:in])
+				} else {
+					arr = append(arr, s1)
+				}
+			}
+		}
+	}
+	return
 }
 
 // 获取两日期之间的全部年份
-func getYears(start, end string) []int {
-	res := make([]int, 0)
-	startTime, endTime := getTimeRanges(start, end)
-	if startTime == nil || endTime == nil {
-		return res
+func getYears(start, end string) (years []int) {
+	years = make([]int, 0)
+	startTime, endTime := carbon.Parse(start), carbon.Parse(end)
+	if startTime.IsInvalid() || endTime.IsInvalid() {
+		return
+	}
+	if startTime.Gte(endTime) {
+		return
 	}
 	endYear := endTime.Year()
-	res = append(res, startTime.Year())
-	// 刚好只有一年
+	years = append(years, startTime.Year())
 	if endYear == startTime.Year() {
-		return res
+		return
 	}
+	current := startTime.AddYear()
 	for {
-		current := startTime.AddDate(1, 0, 0)
-		dateYear := current.Year()
-		startTime = &current
-		res = append(res, dateYear)
-		if dateYear == endYear {
+		currentYear := current.Year()
+		years = append(years, currentYear)
+		if currentYear == endYear {
 			break
 		}
+		current = current.AddYear()
 	}
-	return res
+	return
 }
 
 // 获取两日期之间的全部日期
-func getDates(start, end string) []string {
-	res := make([]string, 0)
-	startTime, endTime := getTimeRanges(start, end)
-	if startTime == nil || endTime == nil {
-		return res
+func getDates(start, end string) (dates []string) {
+	dates = make([]string, 0)
+	startTime, endTime := carbon.Parse(start), carbon.Parse(end)
+	if startTime.IsInvalid() || endTime.IsInvalid() {
+		return
 	}
-	// 输出日期格式固定
-	timeFormatTpl := dateFormat
-	endStr := endTime.Format(timeFormatTpl)
-	res = append(res, startTime.Format(timeFormatTpl))
+	if startTime.Gte(endTime) {
+		return
+	}
+	endDate := endTime.ToDateString()
+	dates = append(dates, startTime.ToDateString())
+	if endDate == startTime.ToDateString() {
+		return
+	}
+	current := startTime.AddDay()
 	for {
-		current := startTime.AddDate(0, 0, 1)
-		dateStr := startTime.Format(timeFormatTpl)
-		startTime = &current
-		res = append(res, dateStr)
-		if dateStr == endStr {
+		currentDate := current.ToDateString()
+		dates = append(dates, currentDate)
+		if currentDate == endDate {
 			break
 		}
+		current = current.AddDay()
 	}
-	return res
-}
-
-// 时间开始结束范围
-func getTimeRanges(start, end string) (*time.Time, *time.Time) {
-	startTime, endTime, after := timeAfter(start, end)
-	if startTime != nil && endTime != nil && !after {
-		t := startTime
-		startTime = endTime
-		endTime = t
-		return startTime, endTime
-	}
-	return startTime, endTime
+	return
 }
 
 // 两日期字符串比较
-func timeAfter(start, end string) (*time.Time, *time.Time, bool) {
-	timeFormatTpl := timeFormat
-	if len(timeFormatTpl) != len(start) {
-		timeFormatTpl = timeFormatTpl[0:len(start)]
+func lt(start, end string) (ok bool) {
+	startTime, endTime := carbon.Parse(start), carbon.Parse(end)
+	if startTime.IsInvalid() || endTime.IsInvalid() {
+		return
 	}
-	startTime, err := time.Parse(timeFormatTpl, start)
-	if err != nil {
-		return nil, nil, false
-	}
-	endTime, err := time.Parse(timeFormatTpl, end)
-	if err != nil {
-		return nil, nil, false
-	}
-	if endTime.After(startTime) {
-		return &startTime, &endTime, true
-	}
-	return &startTime, &endTime, false
+	ok = startTime.Lt(endTime)
+	return
 }
 
-// 字符串转int
-func str2Int(str string) int {
-	num, err := strconv.Atoi(str)
-	if err != nil {
-		return 0
-	}
-	return num
+func str2Int(str string) (num int) {
+	num, _ = strconv.Atoi(str)
+	return
 }

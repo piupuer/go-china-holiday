@@ -1,37 +1,57 @@
 package holiday
 
 import (
-	"fmt"
-	"strings"
 	"testing"
 )
 
-func TestChinaHoliday(t *testing.T) {
-	ins, err := New(&Config{})
-	if err != nil {
-		panic(err)
+func TestChinaHoliday_Check(t *testing.T) {
+	type fields struct {
+		ops Options
+		f   bool
 	}
-	b, err := ins.Check("2021-03-02")
-	if err != nil {
-		panic(err)
+	type args struct {
+		date string
 	}
-	fmt.Println("2021-03-02是否节假日:", b)
-
-	b2, err := ins.Check("2020-10-01")
-	if err != nil {
-		panic(err)
+	tests := []struct {
+		name        string
+		fields      fields
+		args        args
+		wantHoliday bool
+	}{
+		{
+			name:   "test0",
+			fields: fields{},
+			args: args{
+				date: "2018-01-01",
+			},
+			wantHoliday: true,
+		},
+		{
+			name:   "test1",
+			fields: fields{},
+			args: args{
+				date: "2019-01-01",
+			},
+			wantHoliday: true,
+		},
+		{
+			name:   "test2",
+			fields: fields{},
+			args: args{
+				date: "2020-01-01",
+			},
+			wantHoliday: true,
+		},
 	}
-	fmt.Println("2020-10-01是否节假日:", b2)
-
-	h1, w1, err := ins.List(2012)
-	if err != nil {
-		panic(err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch := ChinaHoliday{
+				ops: tt.fields.ops,
+				f:   tt.fields.f,
+			}
+			if gotHoliday := ch.Check(tt.args.date); gotHoliday != tt.wantHoliday {
+				t.Errorf("Check() = %v, want %v", gotHoliday, tt.wantHoliday)
+			}
+		})
 	}
-	fmt.Println("2012全年节假日:", strings.Join(h1, ","), "调休日:", strings.Join(w1, ","))
-
-	h2, w2, err := ins.Range("2021-03-01", "2021-05-01")
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("2021全年节假日2021-03-01到2021-05-01:", strings.Join(h2, ","), "调休日:", strings.Join(w2, ","))
 }
